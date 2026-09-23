@@ -3266,7 +3266,7 @@ class AgentManager:
         )
 
     def _apply_team_host_config(self, cfg: HarnessAgentConfig, row: Any) -> HarnessAgentConfig:
-        from octop.infra.agents.teams import host_tools_disabled, is_team_agent
+        from octop.infra.agents.teams import host_system_prompt, host_tools_disabled, is_team_agent
 
         if not is_team_agent(row):
             if "peer_invoke_mode" in _HARNESS_AGENT_CONFIG_FIELDS:
@@ -3291,4 +3291,6 @@ class AgentManager:
             updates["subagents_auto_load"] = False
         if "bootstrap_enabled" in _HARNESS_AGENT_CONFIG_FIELDS:
             updates["bootstrap_enabled"] = False
+        if "system_prompt" in _HARNESS_AGENT_CONFIG_FIELDS:
+            updates["system_prompt"] = host_system_prompt(row, self._repos.user_repo)
         return replace(cfg, **updates) if updates else cfg
