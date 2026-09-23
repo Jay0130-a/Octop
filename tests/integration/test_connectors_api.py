@@ -66,9 +66,10 @@ async def test_catalog(env):
     assert weiyun["category"] == "office"
     assert weiyun.get("quick_auth_url") == "https://www.weiyun.com/act/openclaw"
     qcc = next(e for e in r.json() if e["kind"] == "qcc")
-    assert qcc["auth_kind"] == "oauth2"
-    assert qcc["oauth_mode"] == "dynamic"
-    assert qcc["oauth_ready"] is True
+    assert qcc["auth_kind"] == "api_key"
+    assert qcc["mcp_mode"] == "internal"
+    assert qcc["oauth_mode"] is None
+    assert qcc["oauth_ready"] is False
     assert qcc["category"] == "professional"
     openalex = next(e for e in r.json() if e["kind"] == "openalex")
     assert openalex == {
@@ -86,7 +87,7 @@ async def test_catalog(env):
         "login_url": None,
         "guide_url": "https://help.openalex.org/access/connector/",
         "manual_url": "https://help.openalex.org/access/connector/",
-        "auth_hint": "点击「一键授权」登录 OpenAlex；查询将使用你自己的 API Key 与每日预算。",
+        "auth_hint": "点击「一键授权」登录 OpenAlex（桌面端请用系统浏览器）；查询将使用你自己的 API Key 与每日预算。",
         "oauth_mode": "dynamic",
         "oauth_ready": True,
         "credential_fields": [],
@@ -701,8 +702,6 @@ async def test_custom_mcp_oauth_start_unified(env):
 
 
 async def test_qcc_gateway_auth_five_resources_and_disconnect(env, monkeypatch):
-    import time
-
     from octop.api.routers.internal_mcp import _service
     from octop.infra.connectors import qcc
 
@@ -713,12 +712,7 @@ async def test_qcc_gateway_auth_five_resources_and_disconnect(env, monkeypatch):
         json={
             "kind": "qcc",
             "display_name": "QCC",
-            "credentials": {
-                "access_token": "synthetic",
-                "refresh_token": "synthetic-refresh",
-                "oauth_client_id": "client",
-                "expires_at": int(time.time()) + 3600,
-            },
+            "credentials": {"api_key": "synthetic"},
         },
     )
     assert created.status_code == 201
@@ -741,23 +735,10 @@ async def test_qcc_gateway_auth_five_resources_and_disconnect(env, monkeypatch):
     other = await create_user(c, auth, username="qcc_reader")
     denied = await c.delete(f"/api/connector-instances/{instance_id}", headers=other)
     assert denied.status_code == 403
-    revoke = AsyncMock()
-    monkeypatch.setattr(qcc, "revoke", revoke)
     deleted = await c.delete(f"/api/connector-instances/{instance_id}", headers=auth)
     assert deleted.status_code == 204
-    revoke.assert_awaited_once()
     gone = await c.post(path, params={"token": token}, json={"id": 2, "method": "tools/list"})
     assert gone.status_code == 404
-
-
-async def test_qcc_disconnect_api_docs(tmp_octop_home):
-    write_octop_config(tmp_octop_home, enable_api_docs=True)
-    async with octop_client(tmp_octop_home) as (c, _):
-        assert (await c.get("/api/docs")).status_code == 200
-        schema = (await c.get("/api/openapi.json")).json()
-        operation = schema["paths"]["/api/connector-instances/{instance_id}"]["delete"]
-        assert operation["summary"] == "Delete connector"
-        assert "five resources" in operation["description"]
 
 
 @pytest.mark.parametrize(

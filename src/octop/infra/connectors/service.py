@@ -7,12 +7,11 @@ import logging
 import time
 from pathlib import Path
 from typing import Any
-from weakref import WeakKeyDictionary
 
 from octop.config import OctopConfig
 from octop.infra.connectors import qcc
 from octop.infra.connectors.builder import build_http_mcp_spec, mcp_server_name, new_internal_token
-from octop.infra.connectors.catalog import get_catalog_entry
+from octop.infra.connectors.catalog import get_catalog_entry, uses_internal_http_mcp
 from octop.infra.connectors.crypto import decrypt_credentials, encrypt_credentials
 from octop.infra.connectors.custom_mcp import (
     CUSTOM_MCP_DISPLAY_NAME,
@@ -50,10 +49,6 @@ from octop.infra.utils.ulid import new_ulid
 logger = logging.getLogger(__name__)
 
 _OAUTH_REFRESH_SKEW_SEC = 120
-
-# Octop runs in one process. Services constructed by different routes share
-# the application's repository, and therefore the same per-grant lock.
-_QCC_LOCKS: WeakKeyDictionary[ConnectorRepo, dict[str, asyncio.Lock]] = WeakKeyDictionary()
 
 
 class ConnectorNameTakenError(ValueError):
@@ -108,11 +103,7 @@ class ConnectorService:
         row = self._repo.get(instance_id)
         if row is None or not row.credential_blob:
             return {}
-        creds = decrypt_credentials(self._secret_repo, row.credential_blob)
-        if row.kind == "qcc" and not creds.get("internal_token"):
-            creds["internal_token"] = new_internal_token()
-            self.encrypt_and_store(instance_id=instance_id, payload=creds)
-        return creds
+        return decrypt_credentials(self._secret_repo, row.credential_blob)
 
     def encrypt_and_store(
         self,
@@ -122,17 +113,19 @@ class ConnectorService:
     ) -> None:
         stored = dict(payload)
         row = self._repo.get(instance_id)
-        if row is not None and row.kind == "qcc":
-            existing = (
-                decrypt_credentials(self._secret_repo, row.credential_blob)
-                if row.credential_blob
-                else {}
-            )
-            stored["internal_token"] = (
-                existing.get("internal_token")
-                or stored.get("internal_token")
-                or new_internal_token()
-            )
+        if row is not None:
+            entry = get_catalog_entry(row.kind)
+            if entry is not None and uses_internal_http_mcp(entry):
+                existing = (
+                    decrypt_credentials(self._secret_repo, row.credential_blob)
+                    if row.credential_blob
+                    else {}
+                )
+                stored["internal_token"] = (
+                    existing.get("internal_token")
+                    or stored.get("internal_token")
+                    or new_internal_token()
+                )
         stored["instance_id"] = instance_id
         expires_at = stored.get("expires_at")
         exp = int(expires_at) if expires_at is not None else None
@@ -145,7 +138,10 @@ class ConnectorService:
         kind: str,
     ) -> dict[str, Any]:
         if kind == "qcc":
-            return await self._fresh_qcc(instance_id)
+            row = self._repo.get(instance_id)
+            if row is None or row.kind != "qcc" or row.status != "active":
+                return {}
+            return self.decrypt(instance_id)
         creds = self.decrypt(instance_id)
         entry = get_catalog_entry(kind)
         if entry is None or entry.auth_kind != "oauth2":
@@ -168,51 +164,11 @@ class ConnectorService:
         self.encrypt_and_store(instance_id=instance_id, payload=creds)
         return creds
 
-    def _qcc_lock(self, instance_id: str) -> asyncio.Lock:
-        locks = _QCC_LOCKS.setdefault(self._repo, {})
-        return locks.setdefault(instance_id, asyncio.Lock())
-
-    async def _fresh_qcc(
-        self, instance_id: str, *, rejected_token: str | None = None
-    ) -> dict[str, Any]:
-        async with self._qcc_lock(instance_id):
-            row = self._repo.get(instance_id)
-            if row is None or row.kind != "qcc" or row.status != "active":
-                return {}
-            creds = self.decrypt(instance_id)
-            token = str(creds.get("access_token") or "")
-            # Another request may already have rotated the token rejected by a 401.
-            force = rejected_token is not None and rejected_token == token
-            expires = int(creds.get("expires_at") or 0)
-            if not force and expires > int(time.time()) + _OAUTH_REFRESH_SKEW_SEC:
-                return creds
-            if not creds.get("refresh_token"):
-                if force or (expires and expires <= int(time.time())):
-                    raise ValueError("QCC authorization expired; please authorize again")
-                return creds
-            if not creds.get("oauth_client_id"):
-                raise ValueError("QCC client registration missing; please authorize again")
-            refreshed = await refresh_oauth_credentials(
-                kind="qcc", creds=creds, settings_repo=self._settings_repo
-            )
-            creds.update(refreshed)
-            self.encrypt_and_store(instance_id=instance_id, payload=creds)
-            return creds
-
     async def _qcc_request(
         self, instance_id: str, resource: str, method: str, params: dict[str, Any]
     ) -> dict[str, Any]:
-        creds = await self._fresh_qcc(instance_id)
-        token = str(creds.get("access_token") or "")
-        if not token:
-            raise ValueError("QCC connector is disconnected")
-        try:
-            return await qcc.request_resource(resource, token, method, params)
-        except Exception as exc:
-            if not qcc.unauthorized(exc):
-                raise
-        creds = await self._fresh_qcc(instance_id, rejected_token=token)
-        token = str(creds.get("access_token") or "")
+        creds = await self.ensure_fresh_credentials(instance_id, "qcc")
+        token = qcc.bearer_token(creds)
         if not token:
             raise ValueError("QCC connector is disconnected")
         return await qcc.request_resource(resource, token, method, params)
@@ -225,11 +181,21 @@ class ConnectorService:
             return handle_mcp_request(kind="qcc", creds={}, body=body)
         try:
             if method == "tools/list":
+                listed = await asyncio.gather(
+                    *[
+                        self._qcc_request(instance_id, resource, "tools/list", {})
+                        for resource in qcc.RESOURCES
+                    ],
+                    return_exceptions=True,
+                )
                 tools: list[dict[str, Any]] = []
-                for resource in qcc.RESOURCES:
-                    result = await self._qcc_request(instance_id, resource, "tools/list", {})
-                    tools.extend(qcc.namespace_tools(resource, result))
-                result = {"tools": tools}
+                for resource, item in zip(qcc.RESOURCES, listed, strict=True):
+                    if isinstance(item, BaseException):
+                        continue
+                    tools.extend(qcc.namespace_tools(resource, item))
+                if not tools:
+                    raise ValueError("QCC MCP request failed; check API Key or try again")
+                result: dict[str, Any] = {"tools": tools}
             else:
                 params = dict(body.get("params") or {})
                 resource, sep, name = str(params.get("name") or "").partition("__")
@@ -246,23 +212,9 @@ class ConnectorService:
                 "id": body.get("id"),
                 "error": {
                     "code": -32603,
-                    "message": "QCC MCP request failed; check connection or authorize again",
+                    "message": "QCC MCP request failed; check API Key or try again",
                 },
             }
-
-    async def disconnect_qcc(self, instance_id: str) -> None:
-        async with self._qcc_lock(instance_id):
-            row = self._repo.get(instance_id)
-            if row is None:
-                return
-            if row.kind != "qcc":
-                raise ValueError("Not a QCC connector")
-            try:
-                await qcc.revoke(self.decrypt(instance_id))
-            except Exception as exc:
-                # Keep the encrypted grant so the user can retry remote revocation.
-                raise ValueError("QCC revocation failed; retry disconnect") from exc
-            self._repo.delete(instance_id)
 
     def reserved_builtin_mcp_names(self, user_id: int) -> set[str]:
         names: set[str] = set()

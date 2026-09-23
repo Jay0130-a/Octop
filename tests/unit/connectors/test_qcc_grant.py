@@ -1,10 +1,8 @@
-"""Exercise the five real SDK transports with synthetic MCP HTTP responses."""
+"""Exercise the five real SDK transports with a stored API Key."""
 
 from __future__ import annotations
 
-import asyncio
 import json
-import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -43,15 +41,7 @@ def grant(tmp_path: Path):
         instance_id="grant", user_id=1, kind="qcc", display_name="QCC", mcp_server_name="qcc__grant"
     )
     svc = service(pool, repo)
-    svc.encrypt_and_store(
-        instance_id="grant",
-        payload={
-            "access_token": "old-access",
-            "refresh_token": "old-refresh",
-            "oauth_client_id": "public-client",
-            "expires_at": int(time.time()) + 3600,
-        },
-    )
+    svc.encrypt_and_store(instance_id="grant", payload={"api_key": "qcc-api-key"})
     return pool, repo, svc
 
 
@@ -102,6 +92,7 @@ def mcp_http(monkeypatch: pytest.MonkeyPatch):
             json={"resource": qcc.RESOURCES[resource], "authorization_servers": [qcc.ISSUER]},
         )
 
+    qcc.clear_metadata_cache()
     monkeypatch.setattr(qcc, "safe_request", metadata)
     monkeypatch.setattr(qcc.httpx, "AsyncClient", factory)
     return calls
@@ -125,67 +116,29 @@ async def test_five_servers_list_paginate_and_call(grant, mcp_http):
         )
         assert result["result"]["content"][0]["text"] == f"/mcp/{resource}/stream"
     assert {url for url, _, _ in mcp_http} == set(qcc.RESOURCES.values())
-    assert {auth for _, auth, _ in mcp_http} == {"Bearer old-access"}
+    assert {auth for _, auth, _ in mcp_http} == {"Bearer qcc-api-key"}
 
 
 @pytest.mark.asyncio
-async def test_concurrent_refresh_across_service_instances(grant, monkeypatch):
-    pool, repo, svc = grant
-    creds = svc.decrypt("grant")
-    creds["expires_at"] = 1
-    svc.encrypt_and_store(instance_id="grant", payload=creds)
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def refresh(**kwargs):
-        assert kwargs["creds"]["refresh_token"] == "old-refresh"
-        entered.set()
-        await release.wait()
-        return {
-            "access_token": "new-access",
-            "refresh_token": "new-refresh",
-            "expires_at": int(time.time()) + 3600,
-        }
-
-    mocked = AsyncMock(side_effect=refresh)
-    monkeypatch.setattr("octop.infra.connectors.service.refresh_oauth_credentials", mocked)
-    tasks = [
-        asyncio.create_task(service(pool, repo).ensure_fresh_credentials("grant", "qcc"))
-        for _ in range(10)
-    ]
-    await entered.wait()
-    release.set()
-    results = await asyncio.gather(*tasks)
-    assert mocked.await_count == 1
-    assert all(r["access_token"] == "new-access" for r in results)
-    assert svc.decrypt("grant")["refresh_token"] == "new-refresh"
-    assert b"new-refresh" not in repo.get("grant").credential_blob
-
-
-@pytest.mark.asyncio
-async def test_restart_restores_rotated_grant(grant, mcp_http):
+async def test_restart_restores_api_key(grant, mcp_http):
     pool, _, svc = grant
     creds = svc.decrypt("grant")
     stable_token = creds["internal_token"]
-    creds.update(access_token="rotated-access", refresh_token="rotated-refresh")
+    creds["api_key"] = "rotated-key"
     svc.encrypt_and_store(instance_id="grant", payload=creds)
-    # Reopen the on-disk DB with new repositories and no in-memory OAuth state.
     restarted = service(SqlitePool(pool.path))
     assert restarted.decrypt("grant")["internal_token"] == stable_token
-    assert restarted.decrypt("grant")["refresh_token"] == "rotated-refresh"
+    assert restarted.decrypt("grant")["api_key"] == "rotated-key"
     result = await restarted.handle_qcc_request("grant", {"id": 1, "method": "tools/list"})
     assert len(result["result"]["tools"]) == 10
-    assert {auth for _, auth, _ in mcp_http} == {"Bearer rotated-access"}
+    assert {auth for _, auth, _ in mcp_http} == {"Bearer rotated-key"}
 
 
 @pytest.mark.asyncio
-async def test_disconnect_revokes_latest_refresh_and_removes_all_servers(grant, monkeypatch):
+async def test_delete_removes_card_and_gateway_access(grant, monkeypatch):
     _, repo, svc = grant
     token = svc.decrypt("grant")["internal_token"]
-    revoke = AsyncMock()
-    monkeypatch.setattr(qcc, "revoke", revoke)
-    await svc.disconnect_qcc("grant")
-    assert revoke.await_args.args[0]["refresh_token"] == "old-refresh"
+    repo.delete("grant")
     assert repo.get("grant") is None
     assert svc.verify_internal_token("grant", token) is None
     assert await svc.mcp_configs_for_user(1) == {}
@@ -194,41 +147,6 @@ async def test_disconnect_revokes_latest_refresh_and_removes_all_servers(grant, 
     result = await svc.handle_qcc_request("grant", {"id": 1, "method": "tools/list"})
     assert "error" in result
     request.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_failed_revoke_keeps_grant_for_retry(grant, monkeypatch):
-    _, repo, svc = grant
-    monkeypatch.setattr(qcc, "revoke", AsyncMock(side_effect=ValueError("offline")))
-    with pytest.raises(ValueError, match="retry disconnect"):
-        await svc.disconnect_qcc("grant")
-    assert repo.get("grant") is not None
-
-
-@pytest.mark.asyncio
-async def test_401_refreshes_once_and_retries(grant, monkeypatch):
-    _, _, svc = grant
-    exc = httpx.HTTPStatusError(
-        "unauthorized",
-        request=httpx.Request("POST", qcc.RESOURCES["risk"]),
-        response=httpx.Response(401),
-    )
-    request = AsyncMock(side_effect=[exc, {"content": [], "isError": False}])
-    refresh = AsyncMock(
-        return_value={
-            "access_token": "new-access",
-            "refresh_token": "new-refresh",
-            "expires_at": int(time.time()) + 3600,
-        }
-    )
-    monkeypatch.setattr(qcc, "request_resource", request)
-    monkeypatch.setattr("octop.infra.connectors.service.refresh_oauth_credentials", refresh)
-    result = await svc.handle_qcc_request(
-        "grant", {"id": 1, "method": "tools/call", "params": {"name": "risk__lookup"}}
-    )
-    assert "result" in result
-    assert [c.args[1] for c in request.await_args_list] == ["old-access", "new-access"]
-    assert refresh.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -244,55 +162,21 @@ async def test_unknown_resource_never_receives_token(grant, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_disconnect_waits_for_rotation_without_resurrecting_grant(grant, monkeypatch):
-    pool, repo, svc = grant
-    creds = svc.decrypt("grant")
-    creds["expires_at"] = 1
-    svc.encrypt_and_store(instance_id="grant", payload=creds)
-    entered, release = asyncio.Event(), asyncio.Event()
-
-    async def refresh(**kwargs):
-        entered.set()
-        await release.wait()
-        return {
-            "access_token": "new",
-            "refresh_token": "rotated",
-            "expires_at": int(time.time()) + 3600,
-        }
-
-    monkeypatch.setattr("octop.infra.connectors.service.refresh_oauth_credentials", refresh)
-    revoke = AsyncMock()
-    monkeypatch.setattr(qcc, "revoke", revoke)
-    rotating = asyncio.create_task(svc.ensure_fresh_credentials("grant", "qcc"))
-    await entered.wait()
-    deleting = asyncio.create_task(service(pool, repo).disconnect_qcc("grant"))
-    await asyncio.sleep(0)
-    revoke.assert_not_awaited()
-    release.set()
-    await asyncio.gather(rotating, deleting)
-    assert revoke.await_args.args[0]["refresh_token"] == "rotated"
-    assert repo.get("grant") is None
-    assert await svc.ensure_fresh_credentials("grant", "qcc") == {}
-
-
-@pytest.mark.asyncio
-async def test_repeated_401_stops_after_one_retry(grant, monkeypatch):
+async def test_invalid_key_does_not_retry(grant, monkeypatch):
     _, _, svc = grant
-    exc = httpx.HTTPStatusError(
-        "secret-in-error",
-        request=httpx.Request("POST", qcc.RESOURCES["risk"]),
-        response=httpx.Response(401),
+    request = AsyncMock(
+        side_effect=httpx.HTTPStatusError(
+            "secret-in-error",
+            request=httpx.Request("POST", qcc.RESOURCES["risk"]),
+            response=httpx.Response(401),
+        )
     )
-    request = AsyncMock(side_effect=exc)
-    refresh = AsyncMock(return_value={"access_token": "new", "expires_at": int(time.time()) + 3600})
     monkeypatch.setattr(qcc, "request_resource", request)
-    monkeypatch.setattr("octop.infra.connectors.service.refresh_oauth_credentials", refresh)
     result = await svc.handle_qcc_request(
         "grant", {"id": 1, "method": "tools/call", "params": {"name": "risk__lookup"}}
     )
     assert "error" in result and "secret-in-error" not in json.dumps(result)
-    assert request.await_count == 2
-    assert refresh.await_count == 1
+    assert request.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -304,39 +188,67 @@ async def test_probe_reports_partial_failure(monkeypatch):
 
     monkeypatch.setattr(qcc, "request_resource", request)
     result = await qcc.probe("synthetic-token")
-    assert result["ok"] is False
+    assert result["ok"] is True
     assert result["tool_count"] == 4
     assert result["servers"]["risk"] == {"ok": False}
     assert len(result["servers"]) == 5
     assert "secret" not in json.dumps(result)
 
 
+def test_select_exposed_tools_prefers_known_suffixes():
+    preferred = [
+        {"name": "company__get_company_profile"},
+        {"name": "company__lookup"},
+        {"name": "company__get_change_records"},
+    ]
+    assert [tool["name"] for tool in qcc.select_exposed_tools(preferred)] == [
+        "company__get_company_profile",
+        "company__get_change_records",
+    ]
+    unknown = [{"name": "company__lookup"}, {"name": "company__detail"}]
+    assert qcc.select_exposed_tools(unknown) == unknown
+
+
+def test_bearer_token_prefers_api_key():
+    assert qcc.bearer_token({"api_key": "k", "access_token": "legacy"}) == "k"
+    assert qcc.bearer_token({"token": "t"}) == "t"
+    assert qcc.bearer_token({}) == ""
+
+
 @pytest.mark.asyncio
-async def test_revoke_discovers_validates_and_posts_refresh_token(monkeypatch):
-    endpoint = qcc.ISSUER + "/oauth/revoke"
-    metadata = AsyncMock(return_value={"revocation_endpoint": endpoint})
-    validate = AsyncMock(return_value=endpoint)
-    request = AsyncMock(return_value=httpx.Response(200, request=httpx.Request("POST", endpoint)))
-    monkeypatch.setattr(qcc, "fetch_authorization_metadata", metadata)
-    monkeypatch.setattr(qcc, "_ensure_mcp_oauth_url", validate)
-    monkeypatch.setattr(qcc, "safe_request", request)
-    await qcc.revoke({"refresh_token": "latest-refresh", "oauth_client_id": "client"})
-    metadata.assert_awaited_once_with(qcc.ISSUER)
-    validate.assert_awaited_once_with(endpoint, issuer=qcc.ISSUER, field="revocation_endpoint")
-    assert request.await_args.kwargs["data"] == {
-        "client_id": "client",
-        "token": "latest-refresh",
-        "token_type_hint": "refresh_token",
-    }
-    validate.side_effect = ValueError("untrusted endpoint")
-    request.reset_mock()
-    with pytest.raises(ValueError):
-        await qcc.revoke({"refresh_token": "latest-refresh"})
-    request.assert_not_awaited()
+async def test_list_keeps_tools_when_one_resource_fails(grant, monkeypatch):
+    _, _, svc = grant
+
+    async def request(resource, *_args, **_kwargs):
+        if resource == "risk":
+            raise ValueError("denied")
+        return {"tools": [{"name": "lookup"}]}
+
+    monkeypatch.setattr(qcc, "request_resource", request)
+    listed = await svc.handle_qcc_request("grant", {"id": 1, "method": "tools/list"})
+    names = [tool["name"] for tool in listed["result"]["tools"]]
+    assert "risk__lookup" not in names
+    assert names == [f"{resource}__lookup" for resource in qcc.RESOURCES if resource != "risk"]
+
+
+@pytest.mark.asyncio
+async def test_resource_metadata_is_cached(mcp_http, monkeypatch):
+    fetches: list[str] = []
+    original = qcc.safe_request
+
+    async def counted(method, url, **kwargs):
+        fetches.append(url)
+        return await original(method, url, **kwargs)
+
+    monkeypatch.setattr(qcc, "safe_request", counted)
+    await qcc.request_resource("risk", "old-access", "tools/list", {})
+    await qcc.request_resource("risk", "old-access", "tools/list", {})
+    assert len(fetches) == 1
 
 
 @pytest.mark.asyncio
 async def test_metadata_mismatch_blocks_bearer_transport(monkeypatch):
+    qcc.clear_metadata_cache()
     response = httpx.Response(
         200,
         request=httpx.Request("GET", qcc.ISSUER),
@@ -348,43 +260,3 @@ async def test_metadata_mismatch_blocks_bearer_transport(monkeypatch):
     with pytest.raises(ValueError, match="metadata mismatch"):
         await qcc.request_resource("risk", "secret", "tools/list", {})
     transport.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_concurrent_401_requests_share_rotated_token(grant, monkeypatch):
-    pool, repo, _ = grant
-    arrived = 0
-    all_arrived = asyncio.Event()
-
-    async def request(resource, token, method, params):
-        nonlocal arrived
-        if token == "old-access":
-            arrived += 1
-            if arrived == 5:
-                all_arrived.set()
-            await all_arrived.wait()
-            raise httpx.HTTPStatusError(
-                "expired",
-                request=httpx.Request("POST", qcc.RESOURCES[resource]),
-                response=httpx.Response(401),
-            )
-        assert token == "new-access"
-        return {"content": []}
-
-    refresh = AsyncMock(
-        return_value={
-            "access_token": "new-access",
-            "refresh_token": "new-refresh",
-            "expires_at": int(time.time()) + 3600,
-        }
-    )
-    monkeypatch.setattr(qcc, "request_resource", request)
-    monkeypatch.setattr("octop.infra.connectors.service.refresh_oauth_credentials", refresh)
-    results = await asyncio.gather(
-        *(
-            service(pool, repo)._qcc_request("grant", resource, "tools/call", {"name": "lookup"})
-            for resource in qcc.RESOURCES
-        )
-    )
-    assert all(result == {"content": []} for result in results)
-    refresh.assert_awaited_once()

@@ -18,6 +18,7 @@ AuthKind = Literal[
 
 CredentialFieldType = Literal["text", "password", "url", "tags"]
 RemoteTransport = Literal["raw_http", "streamable_http", "sse"]
+McpMode = Literal["remote", "gateway", "internal"]
 ConnectorCategory = Literal[
     "office",
     "knowledge",
@@ -50,7 +51,10 @@ class ConnectorCatalogEntry:
     icon: str
     color: str
     phase: Literal["available", "coming_soon"]
-    mcp_mode: Literal["remote", "gateway"]
+    # remote: harness talks to the vendor URL.
+    # gateway: in-process Python adapter; harness config is a name-only placeholder.
+    # internal: Octop-hosted HTTP MCP at /api/internal/mcp; harness loads via HTTP.
+    mcp_mode: McpMode
     category: ConnectorCategory
     quick_auth_url: str | None = None
     login_url: str | None = None
@@ -70,6 +74,16 @@ class ConnectorCatalogEntry:
     mcp_user_agent: str | None = None
     credential_fields: tuple[ConnectorCredentialField, ...] = ()
     remote_transport: RemoteTransport = "raw_http"
+
+
+def is_inprocess_gateway(entry: ConnectorCatalogEntry) -> bool:
+    """Harness injects Python adapter tools; config is a name-only placeholder."""
+    return entry.mcp_mode == "gateway"
+
+
+def uses_internal_http_mcp(entry: ConnectorCatalogEntry) -> bool:
+    """Harness loads Octop-hosted HTTP MCP at ``/api/internal/mcp``."""
+    return entry.mcp_mode == "internal"
 
 
 def is_mcp_oauth_remote(entry: ConnectorCatalogEntry) -> bool:
@@ -363,21 +377,18 @@ _CATALOG: tuple[ConnectorCatalogEntry, ...] = (
     ConnectorCatalogEntry(
         kind="qcc",
         name="企查查",
-        description="一次授权接入企查查五类 MCP：企业数据、风险数据、知识产权、经营信息与董监高信息",
-        auth_kind="oauth2",
+        description="用一份 API Key 接入企查查五类 MCP：企业数据、风险数据、知识产权、经营信息与董监高信息",
+        auth_kind="api_key",
         doc_url="https://agent.qcc.com/",
         icon="qcc",
         color="#008CFF",
         phase="available",
-        mcp_mode="remote",
+        mcp_mode="internal",
         category="professional",
-        guide_url="https://agent.qcc.com/",
-        auth_hint="点击「一键授权」登录企查查并授权，无需手动复制 API Key；查询范围与额度以企查查账户权限为准",
-        oauth_issuer="https://agent.qcc.com",
-        mcp_url="https://agent.qcc.com/mcp/company/stream",
-        oauth_resource="https://agent.qcc.com/mcp/company/stream",
-        oauth_scopes="mcp:tools",
-        remote_transport="streamable_http",
+        quick_auth_url="https://agent.qcc.com/",
+        guide_url="https://agent.qcc.com/guide",
+        manual_url="https://agent.qcc.com/",
+        auth_hint="登录企查查智能体平台，在个人中心复制 API Key 并粘贴到下方；查询范围以账户权限为准，未开通的类别会跳过",
     ),
     ConnectorCatalogEntry(
         kind="tencent-ardot",
@@ -441,7 +452,7 @@ _CATALOG: tuple[ConnectorCatalogEntry, ...] = (
         mcp_mode="remote",
         category="knowledge",
         guide_url="https://help.openalex.org/access/connector/",
-        auth_hint="点击「一键授权」登录 OpenAlex；查询将使用你自己的 API Key 与每日预算。",
+        auth_hint="点击「一键授权」登录 OpenAlex（桌面端请用系统浏览器）；查询将使用你自己的 API Key 与每日预算。",
         oauth_issuer="https://mcp.openalex.org",
         mcp_url="https://mcp.openalex.org/mcp",
         oauth_resource="https://mcp.openalex.org/mcp",
