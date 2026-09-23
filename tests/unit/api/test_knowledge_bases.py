@@ -718,6 +718,21 @@ def test_map_knowledge_error_unclassified_returns_internal_error() -> None:
     assert err_generic.status == 500
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "invalid knowledge document path",
+        "invalid knowledge folder path",
+    ],
+)
+def test_map_knowledge_error_invalid_path_returns_400(message: str) -> None:
+    from octop.api.routers.knowledge_bases import _map_knowledge_error
+
+    err = _map_knowledge_error(ValueError(message), locale="en")
+    assert err.code == ErrorCode.KNOWLEDGE_PATH_INVALID
+    assert err.status == 400
+
+
 def test_map_knowledge_error_prerequisites_distinguished() -> None:
     from octop.api.routers.knowledge_bases import _map_knowledge_error
 
