@@ -105,6 +105,16 @@ async def _persist_agent_tool_enabled(
     tool_enabled: bool,
 ) -> None:
     registry = _registry(server)
+    if tool_enabled:
+        row = registry.get_row(agent_id)
+        if row is None:
+            raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
+        backend = registry._backend_spec_for_row(row)
+        if registry._backend_blocks_acp_outbound(backend):
+            raise OctopError(
+                ErrorCode.ACP_BACKEND_UNSUPPORTED,
+                "outbound acp_runner is unavailable under a directory sandbox",
+            )
     cfg = registry.get_config(agent_id)
     acp = cfg.get("acp")
     if not isinstance(acp, dict):

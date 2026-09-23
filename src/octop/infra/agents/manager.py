@@ -1988,6 +1988,22 @@ class AgentManager:
         except OSError:
             return False
 
+    @staticmethod
+    def _backend_blocks_acp_outbound(spec: Any) -> bool:
+        """True when outbound ``acp_runner`` would bypass the directory sandbox.
+
+        Host-rooted local backends (``/``, ``\\``, or empty) are allowed; scoped
+        ``root_dir`` (bwrap) and non-local backends are blocked. Inbound
+        ``octop acp`` is unaffected.
+        """
+        if not isinstance(spec, dict):
+            return True
+        kind = str(spec.get("type") or "").lower()
+        if kind not in {"local_shell", "filesystem"}:
+            return True
+        root_dir = str(spec.get("root_dir") or "").strip()
+        return root_dir not in {"", "/", "\\"}
+
     async def persist_skill_package_ids(self, agent_id: str, package_ids: list[str]) -> None:
         """Persist package ids after validation and hot-sync a running agent.
 
@@ -3210,7 +3226,10 @@ class AgentManager:
             middleware=agent_middleware or None,
             bootstrap_enabled=not team_host,
             acp_runners=acp_config.runners,
-            acp_delegate_enabled=bool(acp_raw.get("tool_enabled", False)),
+            acp_delegate_enabled=(
+                bool(acp_raw.get("tool_enabled", False))
+                and not self._backend_blocks_acp_outbound(backend)
+            ),
             skills_disabled=frozenset(skills_disabled_set(cfg) | plugin_skills_disabled),
             skills_dir=skill_dirs or None,
             default_timezone=self._config.default_timezone,
