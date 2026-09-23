@@ -41,3 +41,32 @@ def test_completion_in_help() -> None:
     runner = CliRunner()
     result = runner.invoke(cli, ["--help"])
     assert "completion" in result.output
+
+
+def test_completion_install_handles_utf8_chinese_rc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rc 文件含 UTF-8 中文注释时不能在 cp936 Windows 上崩 (#1062)."""
+    rc = tmp_path / ".bashrc"
+    rc.write_text("# 中文备注：自定义补全\nalias ll='ls -al'\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["completion", "install", "--shell", "bash", "--rc-file", str(rc)])
+    assert result.exit_code == 0, result.output
+    assert "_OCTOP_COMPLETE" in rc.read_text(encoding="utf-8")
+
+
+def test_completion_install_handles_legacy_gbk_rc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rc 文件是历史 GBK 编码时，幂等检测也不能崩 (#1062)."""
+    rc = tmp_path / ".bashrc"
+    rc.write_bytes("# 中文备注（GBK）\nalias ll='ls -al'\n".encode("gbk"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["completion", "install", "--shell", "bash", "--rc-file", str(rc)])
+    assert result.exit_code == 0, result.output
+    text = rc.read_text(encoding="utf-8", errors="replace")
+    assert "_OCTOP_COMPLETE" in text
