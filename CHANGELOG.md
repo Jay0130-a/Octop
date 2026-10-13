@@ -8,6 +8,7 @@
 
 ### 修复
 - `OCTOP_HOME` 迁移数据目录后，首次配置向导密码文件随之写入 `<OCTOP_HOME>/octop-login.txt`；旧位置 `~/octop-login.txt` 自动继承，不再生成冲突密码（#2171）
+- 新建提供商时名称与已有提供商重复，不再返回 500「服务器内部错误」，而是 409 与「提供商名称已被占用。」：`admin_create_provider` 与设置向导的 `_apply_provider_draft` 都补上了重名校验（Fixes #1967）
 
 ## [1.0.2] - 2026-10-18
 
