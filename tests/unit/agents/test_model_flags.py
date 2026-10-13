@@ -38,6 +38,27 @@ def test_onnx_provider_identity_marks_models_embedding() -> None:
     )
 
 
+def test_embedding_id_convention_is_detected_without_flag() -> None:
+    """OpenAI-compatible /models ids carry no flag; the name must decide."""
+    # Real ids returned by a remote /models fetch.
+    assert is_embedding_model({"id": "qwen3.7-text-embedding-flash", "enabled": True})
+    assert is_embedding_model({"id": "text-embedding-3-large", "enabled": True})
+    assert is_embedding_model({"id": "nomic-embed-text", "enabled": True})
+    assert is_embedding_model({"id": "bge-reranker-v2-m3", "enabled": True})
+    # Case-insensitive, and independent of the provider row.
+    assert is_embedding_model({"id": "TEXT-EMBEDDING-ADA-002"})
+    # Chat models must stay eligible.
+    assert not is_embedding_model({"id": "qwen3.7-max", "enabled": True})
+    assert not is_embedding_model({"id": "gpt-4o", "enabled": True})
+    assert not is_embedding_model({"id": "deepseek-v4.1-flash", "enabled": True})
+    assert not is_embedding_model({"id": "", "enabled": True})
+
+
+def test_embedding_id_convention_excludes_from_chat_eligibility() -> None:
+    assert not is_chat_eligible_model({"id": "text-embedding-3-small", "enabled": True})
+    assert is_chat_eligible_model({"id": "gpt-4o", "enabled": True})
+
+
 def test_is_onnx_local_provider() -> None:
     from octop.infra.agents.providers.model_flags import is_onnx_local_provider
 

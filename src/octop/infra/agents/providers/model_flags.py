@@ -72,6 +72,19 @@ def is_local_runtime_provider(
     )
 
 
+# Name conventions that mark a model as embedding-only. Mirrors the
+# convention fallback ``is_vision_model`` already has, so openai-compatible
+# providers that only expose ``/models`` ids (no ``embedding`` flag) still
+# surface their embedding models instead of being filtered out.
+_EMBEDDING_ID_HINTS = ("embedding", "-embed", "rerank")
+
+
+def _looks_like_embedding_id(model_id: Any) -> bool:
+    """True when the model id follows a well-known embedding naming pattern."""
+    text = str(model_id or "").strip().lower()
+    return bool(text) and any(hint in text for hint in _EMBEDDING_ID_HINTS)
+
+
 def is_embedding_model(
     model: dict[str, Any],
     *,
@@ -86,13 +99,19 @@ def is_embedding_model(
 
     Legacy fallback: models under the ONNX local provider are treated as
     embedding-only even if the flag was missing.
+
+    Name-convention fallback: ids like ``text-embedding-3-large`` or
+    ``bge-reranker`` are embedding-only even when the provider fetched them
+    without a flag (openai-compatible ``/models`` never carries one).
     """
     if model.get("embedding") is True:
         return True
     task = str(model.get("task") or "").strip().lower()
     if task == "embedding":
         return True
-    return is_onnx_local_provider(provider_name, provider_api_key=provider_api_key)
+    if is_onnx_local_provider(provider_name, provider_api_key=provider_api_key):
+        return True
+    return _looks_like_embedding_id(model.get("id"))
 
 
 def is_vision_model(model: dict[str, Any]) -> bool:
