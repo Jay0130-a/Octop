@@ -5,6 +5,7 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，版本号遵循 [语义化版本规范](https://semver.org/spec/v2.0.0.html)。
 
 ## [Unreleased]
+- Windows 上把 `.js` 关联到 `text/plain` 的机器不再卡在「加载中…」：Dashboard 与插件 UI 的静态资源改为按内置类型表返回 `Content-Type`，不再依赖本机注册表推断的 MIME（Fixes #1940）
 - 对话 mid-turn steering（#1300）：忙碌时可向当前回合投递纠正指令；服务端队列在安全边界 drain 并自动续跑同一回合（工具批次完成后抢占续流，纯文本回答不打断，HITL 暂停保留队列并在审批续跑后 drain）。Steer 提交后立即进入对话流；排队面板只保留未提交草稿（↵ 提交 / ✎ 取回 / ✕ 移除）；Stop 丢弃未 drain 项。协议帧见 `docs/api.md`。
 - Telegram 通道可以限制允许的用户 ID（私聊和群聊都生效）。v1.0.2b7 的更新说明里已经写过这项，但合并时前端字段和 octop-gateway 1.0.1 依赖被丢掉了，这次补回
 - 知识库文档上限设为 0（不限制）时，空库不再被当成已满，可以继续上传和新建文档
