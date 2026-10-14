@@ -68,7 +68,17 @@ def active_model(provider_name: str | None, model_id: str | None) -> None:
         click.echo(_json.dumps(body, indent=2))
         return
     body = get_active_model_offline()
-    click.echo(f"{body.get('provider_name', '?')} / {body.get('model', '?')}")
+    provider = (body.get("provider_name") or "").strip()
+    model = (body.get("model") or "").strip()
+    if not provider and not model:
+        # Previously printed a bare "/" with both sides empty, which told the
+        # reader nothing (#1930).
+        click.echo(
+            "No global default model is set. "
+            "Set one with: octop models active --provider <name> --model <id>",
+        )
+        return
+    click.echo(f"{provider or '?'} / {model or '?'}")
 
 
 @models.command("config")
