@@ -18,6 +18,7 @@
 - 知识库与对话附件支持 WPS Writer（`.wps`）及旧版 Word（`.doc`）：用 `firecrawl-anydoc` 抽成 Markdown 入库 / 注入模型上下文（OLE 二进制按内容识别，不依赖本机安装 WPS）（#1345）
 - 在微信、企业微信、QQ、钉钉、飞书等 App 内置浏览器里点下载，不再只提示「可在浏览器打开此网页来下载文件」：会先生成一个 10 分钟内有效、无需登录的下载链接，可一键复制到手机浏览器打开下载（Fixes #1263）
 - Dashboard 中文等输入法：选词时按下的回车不再提交「编辑并重新发送」、会话重命名、工作区与知识库的新建/重命名，Esc 关闭候选框也不再丢弃正在编辑的内容
+- Kimi 联网搜索不再写死已停服的 `moonshot-v1-128k`：模型可用 `MOONSHOT_SEARCH_MODEL` 覆盖（默认 `kimi-k2.6`），搜索配置抽屉新增可选的模型输入项。probe 同时按 Moonshot 现行规范改用 `$web_search` 内置函数、不再发送固定不可改的 `temperature`，并把 `resource_not_found_error` 说明成「模型不可用/无权限，请改 `MOONSHOT_SEARCH_MODEL`」，不再只透出 404（Fixes #1926）
 
 ## [1.0.2b7] - 2026-10-12
 
