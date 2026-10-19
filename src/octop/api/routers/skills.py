@@ -120,7 +120,12 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     handle YAML for simplicity since finnie's skills all use YAML.
     Returns ``(metadata_dict, body)``. Malformed frontmatter is treated
     as no-frontmatter (the file is its own body).
+
+    A single leading UTF-8 BOM is dropped first: Notepad and the Windows
+    PowerShell 5.1 ``Set-Content -Encoding UTF8`` switch write one, and a
+    BOM'd ``---`` fence would otherwise read as "no frontmatter".
     """
+    text = text.removeprefix("\ufeff")
     if not text.startswith("---\n"):
         return {}, text
     # Find the closing delimiter
